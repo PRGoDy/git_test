@@ -1,0 +1,44 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: access_hub
+      POSTGRES_USER: access_hub
+      POSTGRES_PASSWORD: access_hub
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  api:
+    build:
+      context: ../
+      dockerfile: infra/dockerfiles/api.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://access_hub:access_hub@db:5432/access_hub
+      JWT_SECRET_KEY: super-secret
+      OIDC_ISSUER: http://localhost:5556/dex
+      OIDC_AUDIENCE: access-hub
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+  web:
+    build:
+      context: ../web
+      dockerfile: ../infra/dockerfiles/web.Dockerfile
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    environment:
+      VITE_API_URL: http://localhost:8000/api
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+volumes:
+  db-data:
