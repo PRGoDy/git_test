@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+api/access_hub.db
+web/node_modules/
+web/dist/
+.venv/
+cli/__pycache__/
+.DS_Store
