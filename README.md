@@ -81,12 +81,15 @@ This starts Postgres, Redis, the FastAPI service on `http://localhost:8000`, and
    ./hub roles
    ```
 
-   The CLI spawns a lightweight agent bound to `~/.access-hub/agent.sock` that keeps the application JWT purely in memory. Commands such as `hub roles` or `hub export` retrieve the token over this per-user Unix domain socket; if the session expires the commands prompt you to log in again.
+  The CLI spawns a lightweight agent bound to `~/.access-hub/agent.sock` that keeps the application JWT purely in memory. Commands such as `hub roles` or `hub export` retrieve the token over this per-user Unix domain socket; if the session expires the commands prompt you to log in again.
+
+  When you need to hand the same JWT to other local processes (for example a browser extension opening the Access Hub UI outside the original login flow) run `./hub share-token`. The broker mints a one-time capability URL (served from an ephemeral `127.0.0.1` HTTP endpoint) that returns the JWT exactly once and expires after 60 seconds, allowing secure token exchange without writing it to disk.
 
 ### OIDC & Authentication Flow
 
 - Users authenticate via the `/auth/oidc/callback` endpoint. In development mode, POST an ID token generated with the configured `JWT_SECRET_KEY` to create a session.
 - CLI login uses the `/auth/device/start` and `/auth/device/activate` endpoints. Run `./hub login` (or add the repository root to your `PATH` for a plain `hub` command) to obtain a device code, approve it via the `/device` page in the web UI, then the CLI launches an in-memory token broker so no bearer tokens are written to disk. Subsequent commands retrieve the cached token via a local Unix domain socket.
+- For browser-to-native sharing, invoke `./hub share-token` to create a one-time capability URL guarded by the broker. Fetching that URL (only from localhost) yields the JWT and immediately invalidates the capability, so the token never touches persistent storage.
 
 ### AWS Integration
 
@@ -117,6 +120,7 @@ pytest
 - Policy linting rejects wildcard actions/resources unless a break-glass keyword is present in the justification and toggled by the approver.
 - JWT cookies are HttpOnly, Secure, and SameSite=Strict to mitigate CSRF.
 - Audit log captures requests, approvals, session issuance, and console launches for traceability.
+- Local token sharing happens via one-time capability URLs served from the in-memory broker so no bearer material is persisted to disk.
 
 ### Future Enhancements
 

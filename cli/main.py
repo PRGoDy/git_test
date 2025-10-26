@@ -84,6 +84,15 @@ def _save_token(token: str, expires_in: Optional[int]) -> None:
     _start_agent(token, expires_at)
 
 
+def _mint_capability() -> dict:
+    response = _agent_request({"action": "mint_capability"})
+    if not response:
+        raise RuntimeError("Token broker unavailable")
+    if response.get("status") != "ok":
+        raise RuntimeError(response.get("message", "unable to mint capability"))
+    return response
+
+
 def _auth_headers() -> dict[str, str]:
     token = _load_token()
     if not token:
@@ -181,6 +190,28 @@ def credential_process(role_arn: str, duration: int = typer.Option(3600), api: s
         "Expiration": creds["Expiration"],
     }
     typer.echo(json.dumps(output))
+
+
+@app.command("share-token")
+def share_token() -> None:
+    """Mint a one-time capability URL that returns the current app token."""
+
+    token = _load_token()
+    if not token:
+        typer.echo("Not logged in. Run `hub login` first.")
+        raise typer.Exit(1)
+
+    try:
+        result = _mint_capability()
+    except RuntimeError as exc:  # pragma: no cover - defensive path
+        typer.echo(str(exc))
+        raise typer.Exit(1)
+
+    url = result["url"]
+    expiry = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(result["expires_at"]))
+    typer.echo("Share this URL with local processes to retrieve the JWT once:")
+    typer.echo(f"  {url}")
+    typer.echo(f"Capability expires at: {expiry}")
 
 
 if __name__ == "__main__":

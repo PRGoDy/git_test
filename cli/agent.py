@@ -1,18 +1,54 @@
-"""In-memory token broker for the Access Hub CLI."""
+"""In-memory token broker for the Access Hub CLI.
+
+The broker stores the authenticated Access Hub session entirely in memory and
+exposes two access patterns:
+
+* A Unix domain socket used by the CLI to retrieve or update the cached JWT.
+* An ephemeral loopback HTTP endpoint guarded by one-time capability tokens so
+  that GUI processes (e.g. browsers) can fetch the same JWT without it ever
+  touching disk.
+
+Both surfaces run in the same short-lived process and share the same in-memory
+token state. Capability tokens expire quickly (default 60 seconds) and are
+deleted after the first successful use so other processes cannot linger on the
+credential.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import signal
 import socket
 import sys
+import threading
 import time
+from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from urllib.parse import parse_qs, urlparse
 
 RUNTIME_DIR = Path.home() / ".access-hub"
 SOCKET_PATH = RUNTIME_DIR / "agent.sock"
+CAPABILITY_TTL_SECONDS = 60
+
+
+@dataclass
+class BrokerState:
+    token: Optional[str] = None
+    expires_at: float = 0.0
+    http_port: int = 0
+    capabilities: Dict[str, float] = None  # cap -> expiry
+
+    def __post_init__(self) -> None:
+        if self.capabilities is None:
+            self.capabilities = {}
+
+
+STATE = BrokerState()
 
 
 def _ensure_runtime_dir() -> Path:
@@ -44,6 +80,53 @@ def _cleanup() -> None:
         pass
 
 
+class _TokenHandler(BaseHTTPRequestHandler):
+    server_version = "AccessHubBroker/1.0"
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        parsed = urlparse(self.path)
+        if parsed.path != "/token":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        params = parse_qs(parsed.query)
+        capability = params.get("cap", [None])[0]
+        if not capability:
+            self.send_error(HTTPStatus.BAD_REQUEST, "missing capability")
+            return
+
+        expiry = STATE.capabilities.pop(capability, 0)
+        now = time.time()
+        if not expiry or expiry < now:
+            self.send_error(HTTPStatus.FORBIDDEN, "invalid capability")
+            return
+
+        if not STATE.token or STATE.expires_at <= now:
+            self.send_error(HTTPStatus.FORBIDDEN, "token unavailable")
+            return
+
+        body = json.dumps({"token": STATE.token, "expires_at": STATE.expires_at}).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003 - inherited name
+        # Suppress default stdout logging to keep the broker quiet.
+        return
+
+
+def _start_http_server() -> HTTPServer:
+    httpd = HTTPServer(("127.0.0.1", 0), _TokenHandler)
+    STATE.http_port = httpd.server_port
+
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd
+
+
 def main() -> None:
     payload = sys.stdin.read()
     try:
@@ -51,8 +134,8 @@ def main() -> None:
     except json.JSONDecodeError:
         return
 
-    token = initial.get("token")
-    expires_at = float(initial.get("expires_at", time.time()))
+    STATE.token = initial.get("token")
+    STATE.expires_at = float(initial.get("expires_at", time.time()))
 
     _ensure_runtime_dir()
     if SOCKET_PATH.exists():
@@ -63,8 +146,12 @@ def main() -> None:
     os.chmod(str(SOCKET_PATH), 0o600)
     server.listen()
 
+    httpd = _start_http_server()
+
     def handle_exit(signum, frame):  # type: ignore[unused-argument]
         _cleanup()
+        httpd.shutdown()
+        httpd.server_close()
         server.close()
         sys.exit(0)
 
@@ -79,24 +166,35 @@ def main() -> None:
             request = _read_json(conn)
             action = request.get("action")
             if action == "get":
-                if not token:
+                if not STATE.token:
                     _send_json(conn, {"status": "missing"})
-                elif time.time() >= expires_at:
+                elif time.time() >= STATE.expires_at:
                     _send_json(conn, {"status": "expired"})
                 else:
-                    _send_json(conn, {"status": "ok", "token": token, "expires_at": expires_at})
+                    _send_json(conn, {"status": "ok", "token": STATE.token, "expires_at": STATE.expires_at})
             elif action == "set":
-                token = request.get("token")
-                expires_at = float(request.get("expires_at", time.time()))
+                STATE.token = request.get("token")
+                STATE.expires_at = float(request.get("expires_at", time.time()))
                 _send_json(conn, {"status": "ok"})
             elif action == "ping":
                 _send_json(conn, {"status": "ok"})
+            elif action == "mint_capability":
+                if not STATE.token or STATE.expires_at <= time.time():
+                    _send_json(conn, {"status": "error", "message": "token unavailable"})
+                else:
+                    capability = secrets.token_urlsafe(32)
+                    expiry = time.time() + CAPABILITY_TTL_SECONDS
+                    STATE.capabilities[capability] = expiry
+                    url = f"http://127.0.0.1:{STATE.http_port}/token?cap={capability}"
+                    _send_json(conn, {"status": "ok", "url": url, "expires_at": expiry})
             elif action == "shutdown":
                 _send_json(conn, {"status": "ok"})
                 running = False
             else:
                 _send_json(conn, {"status": "error", "message": "unknown action"})
 
+    httpd.shutdown()
+    httpd.server_close()
     server.close()
 
 
