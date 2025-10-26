@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -10,26 +13,75 @@ import requests
 import typer
 
 DEFAULT_API_URL = os.environ.get("ACCESS_HUB_API", "http://localhost:8000/api")
-TOKEN_PATH = Path.home() / ".access-hub" / "token.json"
+RUNTIME_DIR = Path.home() / ".access-hub"
+SOCKET_PATH = RUNTIME_DIR / "agent.sock"
 
 app = typer.Typer(help="CLI for interacting with Access Hub")
 
 
-def _ensure_storage() -> Path:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return TOKEN_PATH
+def _ensure_runtime_dir() -> Path:
+    RUNTIME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return RUNTIME_DIR
 
 
-def _save_token(token: str) -> None:
-    path = _ensure_storage()
-    path.write_text(json.dumps({"token": token, "saved_at": time.time()}))
+def _agent_request(payload: dict) -> Optional[dict]:
+    _ensure_runtime_dir()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2)
+            client.connect(str(SOCKET_PATH))
+            message = json.dumps(payload).encode("utf-8") + b"\n"
+            client.sendall(message)
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            if not data:
+                return None
+            return json.loads(data.decode("utf-8").strip())
+    except FileNotFoundError:
+        return None
+    except (ConnectionRefusedError, socket.timeout):
+        return None
 
 
 def _load_token() -> Optional[str]:
-    if not TOKEN_PATH.exists():
+    response = _agent_request({"action": "get"})
+    if not response:
         return None
-    data = json.loads(TOKEN_PATH.read_text())
-    return data.get("token")
+    if response.get("status") == "ok":
+        return response.get("token")
+    if response.get("status") == "expired":
+        typer.echo("Session expired. Re-run login.")
+        return None
+    return None
+
+
+def _start_agent(token: str, expires_at: float) -> None:
+    _ensure_runtime_dir()
+    _agent_request({"action": "shutdown"})
+    time.sleep(0.05)
+    if SOCKET_PATH.exists():
+        SOCKET_PATH.unlink()
+    cmd = [sys.executable, "-m", "cli.agent"]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    payload = json.dumps({"token": token, "expires_at": expires_at}) + "\n"
+    if proc.stdin:
+        proc.stdin.write(payload.encode("utf-8"))
+        proc.stdin.flush()
+        proc.stdin.close()
+    # give the agent a moment to bind the socket
+    time.sleep(0.1)
+
+
+def _save_token(token: str, expires_in: Optional[int]) -> None:
+    expires_at = time.time() + (expires_in or 300)
+    response = _agent_request({"action": "set", "token": token, "expires_at": expires_at})
+    if response and response.get("status") == "ok":
+        return
+    _start_agent(token, expires_at)
 
 
 def _auth_headers() -> dict[str, str]:
@@ -59,7 +111,7 @@ def login(api: str = DEFAULT_API_URL) -> None:
         poll.raise_for_status()
         data = poll.json()
         if data["status"] == "authorized" and data.get("access_token"):
-            _save_token(data["access_token"])
+            _save_token(data["access_token"], data.get("expires_in"))
             typer.echo("Login successful.")
             return
         time.sleep(interval)

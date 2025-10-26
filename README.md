@@ -81,10 +81,12 @@ This starts Postgres, Redis, the FastAPI service on `http://localhost:8000`, and
    ./hub roles
    ```
 
+   The CLI spawns a lightweight agent bound to `~/.access-hub/agent.sock` that keeps the application JWT purely in memory. Commands such as `hub roles` or `hub export` retrieve the token over this per-user Unix domain socket; if the session expires the commands prompt you to log in again.
+
 ### OIDC & Authentication Flow
 
 - Users authenticate via the `/auth/oidc/callback` endpoint. In development mode, POST an ID token generated with the configured `JWT_SECRET_KEY` to create a session.
-- CLI login uses the `/auth/device/start` and `/auth/device/activate` endpoints. Run `./hub login` (or add the repository root to your `PATH` for a plain `hub` command) to obtain a device code, approve it via the `/device` page in the web UI, then the CLI stores a short-lived access token locally.
+- CLI login uses the `/auth/device/start` and `/auth/device/activate` endpoints. Run `./hub login` (or add the repository root to your `PATH` for a plain `hub` command) to obtain a device code, approve it via the `/device` page in the web UI, then the CLI launches an in-memory token broker so no bearer tokens are written to disk. Subsequent commands retrieve the cached token via a local Unix domain socket.
 
 ### AWS Integration
 
