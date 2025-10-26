@@ -76,13 +76,15 @@ This starts Postgres, Redis, the FastAPI service on `http://localhost:8000`, and
    ```bash
    cd cli
    pip install -r requirements.txt
-   python -m cli.main roles
+   cd ..
+   ./hub login
+   ./hub roles
    ```
 
 ### OIDC & Authentication Flow
 
 - Users authenticate via the `/auth/oidc/callback` endpoint. In development mode, POST an ID token generated with the configured `JWT_SECRET_KEY` to create a session.
-- CLI login uses the `/auth/device/start` and `/auth/device/activate` endpoints. Run `hub login` to obtain a device code, approve it via the `/device` page in the web UI, then the CLI stores a short-lived access token locally.
+- CLI login uses the `/auth/device/start` and `/auth/device/activate` endpoints. Run `./hub login` (or add the repository root to your `PATH` for a plain `hub` command) to obtain a device code, approve it via the `/device` page in the web UI, then the CLI stores a short-lived access token locally.
 
 ### AWS Integration
 
@@ -94,7 +96,7 @@ Add the following profile to your `~/.aws/config` to leverage the CLI credential
 
 ```
 [profile access-hub]
-credential_process = python -m cli.main credential-process arn:aws:iam::123456789012:role/AccessHubReadOnly
+credential_process = ./hub credential-process arn:aws:iam::123456789012:role/AccessHubReadOnly
 ```
 
 Run `aws --profile access-hub sts get-caller-identity` to confirm.
